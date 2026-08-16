@@ -117,8 +117,14 @@
   .flip-btn:hover{border-color:var(--line);transform:scale(1.05);}
   .flip-btn:active{transform:scale(.92);}
   .flip-btn svg{width:28px;height:28px;}
-  .mirror-flip{right:16px;bottom:18px;}
+  .mirror-flip{right:16px;bottom:84px;}
   .scanner .flip-btn{position:relative;z-index:2;margin-top:16px;}
+  /* cyan Scan button under the flip circle — matches the arrow colour (var(--line)) */
+  .scan-pill{position:absolute;z-index:9;min-width:56px;padding:11px 16px;border-radius:999px;background:rgba(5,7,10,.55);backdrop-filter:blur(8px);border:1px solid var(--line);color:var(--line);font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:12px;box-shadow:0 6px 20px rgba(0,0,0,.4);transition:transform .15s,background .15s;display:flex;align-items:center;gap:6px;}
+  .scan-pill svg{width:16px;height:16px;}
+  .scan-pill:hover{transform:scale(1.05);background:rgba(111,214,224,.14);}
+  .scan-pill:active{transform:scale(.94);}
+  .mirror-scan{right:16px;bottom:20px;}
   .placeholder{position:absolute;inset:0;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:24px;color:var(--mute);background:repeating-linear-gradient(45deg,rgba(255,255,255,.015) 0 12px,transparent 12px 24px),var(--graphite);}
   .placeholder svg{width:56px;height:56px;opacity:.5;}
   .placeholder .p-t{color:var(--mercury);letter-spacing:.16em;text-transform:uppercase;font-size:12px;}
@@ -324,6 +330,7 @@
   </nav>
 
   <button class="flip-btn mirror-flip" id="mirrorFlip" aria-label="Switch camera" title="Switch camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+  <button class="scan-pill mirror-scan" id="mirrorScan" aria-label="Scan the other phone" title="Scan the other phone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="3" y1="12" x2="21" y2="12"/></svg>Scan</button>
 
   <div class="capture" id="capture">
     <img id="capImg" alt="Captured frame">
@@ -2721,6 +2728,32 @@ var qrcode = function() {
   function applyTransform(id){const v=document.getElementById(id);v.style.transform=(mirrored[id]?'scaleX(-1) ':'')+'scale('+zoom[id]+')';}
   function setStatus(el,msg,cls){el.textContent=msg;el.className='status'+(cls?' '+cls:'');}
   function orbit(on){document.getElementById('orbit').classList.toggle('show',!!on);}
+
+  /* ---------------- CONFIRMATION BELL ---------------- */
+  // A single soft "ding" the moment two phones lock together. Uses WebAudio so
+  // there is no sound file to host. primeAudio() is called on the connect taps
+  // so the browser lets the (later, async) bell actually play.
+  let _bellPlayed=false;
+  function primeAudio(){try{const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;const ctx=playBell._ctx||(playBell._ctx=new AC());if(ctx.state==='suspended')ctx.resume();}catch(e){}}
+  function playBell(){
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;
+      const ctx=playBell._ctx||(playBell._ctx=new AC());
+      if(ctx.state==='suspended')ctx.resume();
+      const t=ctx.currentTime;
+      const o=ctx.createOscillator(),g=ctx.createGain();
+      o.type='sine';
+      o.frequency.setValueAtTime(880,t);
+      o.frequency.exponentialRampToValueAtTime(1320,t+0.10);
+      g.gain.setValueAtTime(0.0001,t);
+      g.gain.exponentialRampToValueAtTime(0.5,t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+0.9);
+      o.connect(g);g.connect(ctx.destination);
+      o.start(t);o.stop(t+0.95);
+    }catch(e){}
+  }
+  // Ring exactly once per connection (reset when a new connection starts / on logout).
+  function bellOnce(){if(_bellPlayed)return;_bellPlayed=true;playBell();}
   async function copyWithCheck(btn,text){
     if(!text){toastMsg('Nothing to copy yet');return;}
     try{await navigator.clipboard.writeText(text);}
@@ -2742,6 +2775,7 @@ var qrcode = function() {
   }
   function stopEverything(){
     orbit(false);
+    _bellPlayed=false;
     if(pc){try{pc.close();}catch(e){}pc=null;}
     if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
     extraStreams.forEach(s=>s.getTracks().forEach(t=>t.stop()));extraStreams=[];
@@ -2854,6 +2888,7 @@ var qrcode = function() {
   /* ---------------- SENDER (Phone A) ---------------- */
   async function startSender(){
     panel('#panelSender');
+    primeAudio();_bellPlayed=false;
     setStatus($('#senderStatus'),'Opening camera and preparing code…','work');
     try{localStream=await gum(camNow());}catch(e){setStatus($('#senderStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#senderRetryRow').style.display='';return;}
     $('#senderRetryRow').style.display='none';
@@ -2863,7 +2898,7 @@ var qrcode = function() {
     pc.onconnectionstatechange=()=>{
       const st=pc.connectionState;
       if(st==='connecting'){orbit(true);}
-      else if(st==='connected'){orbit(false);setStatus($('#senderStatus'),'Connected. Streaming your view.','ok');$('#senderLive').classList.add('show');}
+      else if(st==='connected'){orbit(false);bellOnce();setStatus($('#senderStatus'),'Connected. Streaming your view.','ok');$('#senderLive').classList.add('show');}
       else if(st==='failed'){orbit(false);setStatus($('#senderStatus'),'Connection failed. Both phones must share Wi‑Fi; some networks need a relay server.','err');}
       else if(st==='disconnected'){orbit(false);setStatus($('#senderStatus'),'Disconnected.','err');}
     };
@@ -2889,6 +2924,7 @@ var qrcode = function() {
   /* ---------------- RECEIVER (Phone B) ---------------- */
   async function startReceiver(){
     panel('#panelReceiver');
+    primeAudio();
     setStatus($('#recvStatus'),'Opening your camera…','work');
     try{localStream=await gum(camNow());}catch(e){setStatus($('#recvStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#recvRetryRow').style.display='';return;}
     $('#recvRetryRow').style.display='none';
@@ -2898,12 +2934,13 @@ var qrcode = function() {
   async function buildAnswer(raw){
     if(!raw){setStatus($('#recvStatus'),'No code captured.','err');return;}
     let off;try{off=await dec(raw);}catch(e){setStatus($('#recvStatus'),"That code isn't valid.",'err');return;}
+    primeAudio();_bellPlayed=false;
     pc=new RTCPeerConnection(await getIceConfig());
-    pc.ontrack=e=>{orbit(false);videoA.srcObject=e.streams[0];phA.style.display='none';applyTransform('videoA');enterMirror();};
+    pc.ontrack=e=>{orbit(false);bellOnce();videoA.srcObject=e.streams[0];phA.style.display='none';applyTransform('videoA');enterMirror();};
     pc.onconnectionstatechange=()=>{
       const st=pc.connectionState;
       if(st==='connecting'){orbit(true);}
-      else if(st==='connected'){orbit(false);setStatus($('#recvStatus'),'Connected!','ok');toastMsg('Connected');enterMirror();}
+      else if(st==='connected'){orbit(false);bellOnce();setStatus($('#recvStatus'),'Connected!','ok');toastMsg('Connected');enterMirror();}
       else if(st==='failed'){orbit(false);setStatus($('#recvStatus'),'Connection failed. Both phones must share Wi‑Fi; some networks need a relay server.','err');}
     };
     try{
@@ -2920,6 +2957,14 @@ var qrcode = function() {
   function recvScan(){startScan(v=>buildAnswer(v));}
   function receiverAnswer(){buildAnswer($('#recvOffer').value.trim());}
   function enterMirror(){show('mirror');}
+  // Scan button on the mirror screen: make sure this phone's own camera is live
+  // (so the second window has a picture), then scan and lock onto the other phone.
+  async function connectByScan(){
+    primeAudio();
+    if(!localStream){try{localStream=await gum(camNow());}catch(e){}}
+    if(localStream&&!videoB.srcObject){videoB.srcObject=localStream;applyTransform('videoB');}
+    startScan(v=>buildAnswer(v));
+  }
 
   /* ---------------- MIRROR FEATURES ---------------- */
   function grab(v){
@@ -2973,12 +3018,13 @@ var qrcode = function() {
   $('#scanCancel').addEventListener('click',()=>{if(scanStop)scanStop();});
   $('#scanFlip').addEventListener('click',flipCamera);
   $('#mirrorFlip').addEventListener('click',flipCamera);
+  $('#mirrorScan').addEventListener('click',connectByScan);
 
   $('#menuBtn').addEventListener('click',()=>openMenu(!menu.classList.contains('open')));
   scrim.addEventListener('click',()=>openMenu(false));
   menu.addEventListener('click',e=>{const b=e.target.closest('.menu-item');if(!b)return;const a=b.dataset.act;if(actions[a])actions[a]();if(a!=='save'&&a!=='time'&&a!=='flip')openMenu(false);});
   document.querySelectorAll('.close').forEach(btn=>btn.addEventListener('click',()=>{(btn.dataset.win==='A'?winA:winB).classList.add('closed');toastMsg('View closed — Restore from menu');}));
-  [[winA,videoA],[winB,videoB]].forEach(([win,vid])=>win.addEventListener('click',e=>{if(e.target.closest('.close,.zoom,.menu-btn,.placeholder,.flip-btn'))return;tapCapture(vid);}));
+  [[winA,videoA],[winB,videoB]].forEach(([win,vid])=>win.addEventListener('click',e=>{if(e.target.closest('.close,.zoom,.menu-btn,.placeholder,.flip-btn,.scan-pill'))return;tapCapture(vid);}));
   $('#capSave').addEventListener('click',()=>{lastFrame=pendingFrame;saveFrame(pendingFrame);capture.classList.remove('show');});
   $('#capDel').addEventListener('click',()=>{pendingFrame=null;capture.classList.remove('show');toastMsg('Deleted');});
   document.querySelectorAll('.zoom input').forEach(sl=>sl.addEventListener('input',()=>{
