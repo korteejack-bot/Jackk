@@ -2749,33 +2749,60 @@ var qrcode = function() {
   }
 
   /* ---------------- CAMERA FLIP ---------------- */
-  // Toggle between the front (user) and back (environment) camera. Re-acquires
-  // the local camera, swaps it into whichever video elements were showing it,
-  // and (if a call is live) replaces the outgoing track without renegotiating.
-  async function flipCamera(){
-    if(!navigator.mediaDevices?.getUserMedia){toastMsg('Camera not available');return;}
-    const prev=facing;
-    facing=(facing==='user')?'environment':'user';
-    let newStream;
-    try{newStream=await gum(camNow());}
-    catch(e){facing=prev;toastMsg('Camera switch not available');return;}
-    const newTrack=newStream.getVideoTracks()[0];
-    if(pc){
-      try{
-        const sender=pc.getSenders().find(x=>x.track&&x.track.kind==='video');
-        if(sender)await sender.replaceTrack(newTrack);
-      }catch(e){}
-    }
-    const oldStream=localStream;
-    localStream=newStream;
+  // Hard-switch between the front (user) and back (environment) camera.
+  // Phones often return the SAME lens for facingMode:{ideal:...} while the
+  // current camera is still open, so we: (1) note the current deviceId,
+  // (2) fully RELEASE the current lens, then (3) force the opposite one via
+  // exact facingMode, falling back to a different deviceId, then ideal, then any.
+  let _flipBusy=false;
+  // Point whichever video elements were showing the local camera at the new stream.
+  function attachLocal(oldStream,newStream){
     const sp=$('#senderPreview'),sv=$('#scanVideo');
     let attached=false;
-    [videoA,videoB,sp,sv].forEach(el=>{if(el&&oldStream&&el.srcObject===oldStream){el.srcObject=newStream;attached=true;}});
-    if(!attached){videoB.srcObject=newStream;}
-    if(oldStream){oldStream.getTracks().forEach(t=>{if(t!==newTrack)t.stop();});}
+    [videoA,videoB,sp,sv].forEach(el=>{if(el&&el.srcObject===oldStream){el.srcObject=newStream;attached=true;}});
+    if(!attached){
+      if(sv&&$('#scanner').classList.contains('show'))sv.srcObject=newStream;
+      videoB.srcObject=newStream;
+    }
+  }
+  async function flipCamera(){
+    if(!navigator.mediaDevices?.getUserMedia){toastMsg('Camera not available');return;}
+    if(_flipBusy)return; _flipBusy=true;
+    const want=(facing==='user')?'environment':'user';
+    const oldStream=localStream;
+    const oldTrack=oldStream?oldStream.getVideoTracks()[0]:null;
+    const oldId=(oldTrack&&oldTrack.getSettings)?(oldTrack.getSettings().deviceId||null):null;
+    let cams=[];
+    try{cams=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');}catch(e){}
+    // release the current lens first — required on most phones to open the other one
+    if(oldTrack){try{oldTrack.stop();}catch(e){}}
+    const openWith=async cons=>{try{return await gum(cons);}catch(e){return null;}};
+    // 1) force the opposite facing outright
+    let ns=await openWith({facingMode:{exact:want}});
+    // 2) otherwise pick a camera with a different deviceId than the current one
+    if(!ns&&cams.length>1){
+      const other=cams.find(c=>c.deviceId&&c.deviceId!==oldId)||cams[cams.length-1];
+      if(other&&other.deviceId)ns=await openWith({deviceId:{exact:other.deviceId}});
+    }
+    // 3) soft preference, then 4) any camera at all
+    if(!ns)ns=await openWith({facingMode:{ideal:want}});
+    if(!ns)ns=await openWith(true);
+    if(!ns){
+      // nothing opened — restore the previous lens so we don't leave a black screen
+      const restore=await openWith({facingMode:{ideal:facing}})||await openWith(true);
+      if(restore){localStream=restore;attachLocal(oldStream,restore);if(pc){try{const s=pc.getSenders().find(x=>x.track&&x.track.kind==='video');if(s)await s.replaceTrack(restore.getVideoTracks()[0]);}catch(e){}}}
+      toastMsg('Could not switch camera'); _flipBusy=false; return;
+    }
+    facing=want;
+    const newTrack=ns.getVideoTracks()[0];
+    if(pc){try{const s=pc.getSenders().find(x=>x.track&&x.track.kind==='video');if(s)await s.replaceTrack(newTrack);}catch(e){}}
+    if(oldStream){oldStream.getTracks().forEach(t=>{if(t!==newTrack){try{t.stop();}catch(e){}}});}
+    localStream=ns;
+    attachLocal(oldStream,ns);
     mirrored.videoB=(facing==='user');   // mirror the selfie view, un-mirror the back cam
     applyTransform('videoB');
     toastMsg(facing==='user'?'Front camera':'Back camera');
+    _flipBusy=false;
   }
 
   /* ---------------- SOLO MODE ---------------- */
