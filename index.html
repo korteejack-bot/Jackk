@@ -112,6 +112,13 @@
   .cap-del{background:transparent;border:1px solid var(--danger);color:var(--danger);}
   .toast{position:absolute;z-index:40;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:rgba(5,7,10,.9);border:1px solid rgba(255,255,255,.1);color:var(--edge);padding:10px 18px;border-radius:999px;font-size:12px;letter-spacing:.08em;opacity:0;transition:.25s;}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  /* ---------- CAMERA FLIP ---------- */
+  .flip-btn{position:absolute;z-index:9;width:56px;height:56px;border-radius:50%;background:rgba(5,7,10,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);display:grid;place-items:center;color:var(--line);box-shadow:0 6px 20px rgba(0,0,0,.4);transition:border-color .15s,transform .15s;}
+  .flip-btn:hover{border-color:var(--line);transform:scale(1.05);}
+  .flip-btn:active{transform:scale(.92);}
+  .flip-btn svg{width:28px;height:28px;}
+  .mirror-flip{right:16px;bottom:18px;}
+  .scanner .flip-btn{position:relative;z-index:2;margin-top:16px;}
   .placeholder{position:absolute;inset:0;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:24px;color:var(--mute);background:repeating-linear-gradient(45deg,rgba(255,255,255,.015) 0 12px,transparent 12px 24px),var(--graphite);}
   .placeholder svg{width:56px;height:56px;opacity:.5;}
   .placeholder .p-t{color:var(--mercury);letter-spacing:.16em;text-transform:uppercase;font-size:12px;}
@@ -252,6 +259,7 @@
   <video id="scanVideo" autoplay playsinline muted></video>
   <div class="scan-frame"></div>
   <div class="scan-hint">Point at the other phone's code</div>
+  <button class="flip-btn" id="scanFlip" aria-label="Switch camera" title="Switch camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
   <button class="btn ghost" id="scanCancel">Cancel</button>
 </div>
 
@@ -309,10 +317,13 @@
     <button class="menu-item" data-act="time"><span class="k">❚❚</span>Freeze (Time)</button>
     <button class="menu-item" data-act="restore"><span class="k">⤾</span>Restore view</button>
     <button class="menu-item" data-act="save"><span class="k">↓</span>Save last frame</button>
+    <button class="menu-item" data-act="flip"><span class="k">⟳</span>Switch camera</button>
     <button class="menu-item" data-act="horizontal"><span class="k">▮▮</span>Horizontal</button>
     <button class="menu-item" data-act="vertical"><span class="k">▬</span>Vertical</button>
     <button class="menu-item logout" data-act="logout"><span class="k">⏻</span>Logout</button>
   </nav>
+
+  <button class="flip-btn mirror-flip" id="mirrorFlip" aria-label="Switch camera" title="Switch camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
 
   <div class="capture" id="capture">
     <img id="capImg" alt="Captured frame">
@@ -910,17 +921,17 @@ var qrcode = function() {
 
       var img = '';
       img += '<img';
-      img += '\u0020src="';
+      img += ' src="';
       img += _this.createDataURL(cellSize, margin);
       img += '"';
-      img += '\u0020width="';
+      img += ' width="';
       img += size;
       img += '"';
-      img += '\u0020height="';
+      img += ' height="';
       img += size;
       img += '"';
       if (alt) {
-        img += '\u0020alt="';
+        img += ' alt="';
         img += escapeXml(alt);
         img += '"';
       }
@@ -2095,7 +2106,7 @@ var qrcode = function() {
       if (test.length != 2 || ( (test[0] << 8) | test[1]) != code) {
         throw 'sjis not supported.';
       }
-    }('\u53cb', 0x9746);
+    }('友', 0x9746);
 
     var _bytes = stringToBytes(data);
 
@@ -2641,6 +2652,8 @@ var qrcode = function() {
   let lastFrame=null,pendingFrame=null;
   const mirrored={videoA:false,videoB:true};
   const zoom={videoA:1,videoB:1};
+  let facing='user';            // 'user' = front camera, 'environment' = back camera
+  const camNow=()=>({facingMode:{ideal:facing}});
 
   /* ---------------- TURN / ICE CONFIG ----------------
      STUN handles direct peer-to-peer; a TURN relay is the fallback for
@@ -2735,12 +2748,42 @@ var qrcode = function() {
     videoA.srcObject=null;videoB.srcObject=null;
   }
 
+  /* ---------------- CAMERA FLIP ---------------- */
+  // Toggle between the front (user) and back (environment) camera. Re-acquires
+  // the local camera, swaps it into whichever video elements were showing it,
+  // and (if a call is live) replaces the outgoing track without renegotiating.
+  async function flipCamera(){
+    if(!navigator.mediaDevices?.getUserMedia){toastMsg('Camera not available');return;}
+    const prev=facing;
+    facing=(facing==='user')?'environment':'user';
+    let newStream;
+    try{newStream=await gum(camNow());}
+    catch(e){facing=prev;toastMsg('Camera switch not available');return;}
+    const newTrack=newStream.getVideoTracks()[0];
+    if(pc){
+      try{
+        const sender=pc.getSenders().find(x=>x.track&&x.track.kind==='video');
+        if(sender)await sender.replaceTrack(newTrack);
+      }catch(e){}
+    }
+    const oldStream=localStream;
+    localStream=newStream;
+    const sp=$('#senderPreview'),sv=$('#scanVideo');
+    let attached=false;
+    [videoA,videoB,sp,sv].forEach(el=>{if(el&&oldStream&&el.srcObject===oldStream){el.srcObject=newStream;attached=true;}});
+    if(!attached){videoB.srcObject=newStream;}
+    if(oldStream){oldStream.getTracks().forEach(t=>{if(t!==newTrack)t.stop();});}
+    mirrored.videoB=(facing==='user');   // mirror the selfie view, un-mirror the back cam
+    applyTransform('videoB');
+    toastMsg(facing==='user'?'Front camera':'Back camera');
+  }
+
   /* ---------------- SOLO MODE ---------------- */
   async function startSolo(){
     show('mirror');
     if(!navigator.mediaDevices?.getUserMedia){phA.querySelector('.p-s').textContent="This browser can't open the camera. Use Chrome or Safari over https.";return;}
     let primed;
-    try{primed=await gum(true);}catch(e){toastMsg('Camera permission needed');phA.querySelector('.p-s').textContent='Camera access was blocked. Allow it and reopen.';return;}
+    try{primed=await gum(camNow());}catch(e){toastMsg('Camera permission needed');phA.querySelector('.p-s').textContent='Camera access was blocked. Allow it and reopen.';return;}
     localStream=primed;videoB.srcObject=primed;applyTransform('videoB');
     let devices=[];try{devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');}catch(e){}
     if(devices.length>=2){
@@ -2769,7 +2812,7 @@ var qrcode = function() {
     if(!('BarcodeDetector'in window)){toastMsg('Scanning not supported on this phone — use the codes option');return;}
     let det;try{det=new BarcodeDetector({formats:['qr_code']});}catch(e){toastMsg('Scanning not supported on this phone — use the codes option');return;}
     const overlay=$('#scanner'),v=$('#scanVideo');
-    if(!localStream){try{localStream=await gum(true);}catch(e){toastMsg('Camera needed to scan');return;}}
+    if(!localStream){try{localStream=await gum(camNow());}catch(e){toastMsg('Camera needed to scan');return;}}
     v.srcObject=localStream;overlay.classList.add('show');
     let stopped=false;
     scanStop=()=>{stopped=true;overlay.classList.remove('show');v.srcObject=null;};
@@ -2785,7 +2828,7 @@ var qrcode = function() {
   async function startSender(){
     panel('#panelSender');
     setStatus($('#senderStatus'),'Opening camera and preparing code…','work');
-    try{localStream=await gum(true);}catch(e){setStatus($('#senderStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#senderRetryRow').style.display='';return;}
+    try{localStream=await gum(camNow());}catch(e){setStatus($('#senderStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#senderRetryRow').style.display='';return;}
     $('#senderRetryRow').style.display='none';
     $('#senderPreview').srcObject=localStream;
     pc=new RTCPeerConnection(await getIceConfig());
@@ -2820,10 +2863,10 @@ var qrcode = function() {
   async function startReceiver(){
     panel('#panelReceiver');
     setStatus($('#recvStatus'),'Opening your camera…','work');
-    try{localStream=await gum(true);}catch(e){setStatus($('#recvStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#recvRetryRow').style.display='';return;}
+    try{localStream=await gum(camNow());}catch(e){setStatus($('#recvStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#recvRetryRow').style.display='';return;}
     $('#recvRetryRow').style.display='none';
     videoB.srcObject=localStream;applyTransform('videoB');
-    setStatus($('#recvStatus'),'Tap Scan and point at the other phone\u2019s code.','');
+    setStatus($('#recvStatus'),'Tap Scan and point at the other phone’s code.','');
   }
   async function buildAnswer(raw){
     if(!raw){setStatus($('#recvStatus'),'No code captured.','err');return;}
@@ -2877,6 +2920,7 @@ var qrcode = function() {
     time(){setLive(false);freezeTime();},
     restore(){let any=false;document.querySelectorAll('.win.closed').forEach(w=>{w.classList.remove('closed');any=true;});toastMsg(any?'View restored':'Nothing to restore');},
     save(){saveFrame(lastFrame);},
+    flip(){flipCamera();},
     horizontal(){stage.classList.add('horizontal');toastMsg('Horizontal');},
     vertical(){stage.classList.remove('horizontal');toastMsg('Vertical');},
     logout(){stopEverything();openMenu(false);show('home');}
@@ -2900,12 +2944,14 @@ var qrcode = function() {
   $('#recvCopy').addEventListener('click',()=>copyWithCheck($('#recvCopy'),$('#recvReply').value));
   $('#recvRetry').addEventListener('click',startReceiver);
   $('#scanCancel').addEventListener('click',()=>{if(scanStop)scanStop();});
+  $('#scanFlip').addEventListener('click',flipCamera);
+  $('#mirrorFlip').addEventListener('click',flipCamera);
 
   $('#menuBtn').addEventListener('click',()=>openMenu(!menu.classList.contains('open')));
   scrim.addEventListener('click',()=>openMenu(false));
-  menu.addEventListener('click',e=>{const b=e.target.closest('.menu-item');if(!b)return;const a=b.dataset.act;if(actions[a])actions[a]();if(a!=='save'&&a!=='time')openMenu(false);});
+  menu.addEventListener('click',e=>{const b=e.target.closest('.menu-item');if(!b)return;const a=b.dataset.act;if(actions[a])actions[a]();if(a!=='save'&&a!=='time'&&a!=='flip')openMenu(false);});
   document.querySelectorAll('.close').forEach(btn=>btn.addEventListener('click',()=>{(btn.dataset.win==='A'?winA:winB).classList.add('closed');toastMsg('View closed — Restore from menu');}));
-  [[winA,videoA],[winB,videoB]].forEach(([win,vid])=>win.addEventListener('click',e=>{if(e.target.closest('.close,.zoom,.menu-btn,.placeholder'))return;tapCapture(vid);}));
+  [[winA,videoA],[winB,videoB]].forEach(([win,vid])=>win.addEventListener('click',e=>{if(e.target.closest('.close,.zoom,.menu-btn,.placeholder,.flip-btn'))return;tapCapture(vid);}));
   $('#capSave').addEventListener('click',()=>{lastFrame=pendingFrame;saveFrame(pendingFrame);capture.classList.remove('show');});
   $('#capDel').addEventListener('click',()=>{pendingFrame=null;capture.classList.remove('show');toastMsg('Deleted');});
   document.querySelectorAll('.zoom input').forEach(sl=>sl.addEventListener('input',()=>{
