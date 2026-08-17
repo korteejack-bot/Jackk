@@ -156,6 +156,19 @@
   .orbit.show{display:flex;}
   .orbit svg{width:min(46vw,180px);height:auto;filter:drop-shadow(0 0 10px var(--line-dim));}
   .orbit-cap{margin-top:18px;color:var(--edge);letter-spacing:.18em;text-transform:uppercase;font-size:12px;}
+  /* ---------- LINKING (AIM) — rising-dot fountain while the private link forms ---------- */
+  .linking{position:fixed;inset:0;z-index:58;display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(11,14,18,.86);backdrop-filter:blur(5px);padding:26px;text-align:center;}
+  .linking.show{display:flex;}
+  .fountain{display:flex;align-items:flex-end;gap:12px;height:52px;}
+  .fountain span{width:14px;height:14px;border-radius:50%;background:var(--line);opacity:.22;animation:pump 1.25s infinite ease-in-out;}
+  .fountain span:nth-child(1){animation-delay:0s;}
+  .fountain span:nth-child(2){animation-delay:.16s;}
+  .fountain span:nth-child(3){animation-delay:.32s;}
+  .fountain span:nth-child(4){animation-delay:.48s;}
+  @keyframes pump{0%,100%{opacity:.22;transform:translateY(0);}40%{opacity:1;transform:translateY(-24px);box-shadow:0 0 16px var(--line-dim);}}
+  .linking-cap{color:var(--edge);letter-spacing:.16em;text-transform:uppercase;font-size:12px;}
+  .linking .qrbox{max-width:230px;}
+  .linking-sub{color:var(--mute);font-size:12px;line-height:1.55;max-width:280px;}
   @media (prefers-reduced-motion:reduce){*{transition:none !important;}}
 </style>
 </head>
@@ -282,6 +295,15 @@
   <div class="orbit-cap">Connecting…</div>
 </div>
 
+<!-- ============ LINKING (AIM) ============ -->
+<div class="linking" id="linking">
+  <div class="fountain"><span></span><span></span><span></span><span></span></div>
+  <div class="linking-cap" id="linkCap">Establishing private link…</div>
+  <div class="qrbox" id="linkQR" style="display:none"><span class="qr-wait">Preparing…</span></div>
+  <div class="linking-sub" id="linkSub"></div>
+  <button class="btn ghost" id="linkCancel">Cancel</button>
+</div>
+
 <!-- ============ MIRROR ============ -->
 <section id="mirror" class="screen">
   <div class="stage" id="stage">
@@ -330,7 +352,7 @@
   </nav>
 
   <button class="flip-btn mirror-flip" id="mirrorFlip" aria-label="Switch camera" title="Switch camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
-  <button class="scan-pill mirror-scan" id="mirrorScan" aria-label="Scan the other phone" title="Scan the other phone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="3" y1="12" x2="21" y2="12"/></svg>Scan</button>
+  <button class="scan-pill mirror-scan" id="mirrorAim" aria-label="Aim and link to the other phone" title="Aim and link to the other phone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><line x1="12" y1="1" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="1" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="23" y2="12"/><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/></svg>AIM</button>
 
   <div class="capture" id="capture">
     <img id="capImg" alt="Captured frame">
@@ -2957,13 +2979,43 @@ var qrcode = function() {
   function recvScan(){startScan(v=>buildAnswer(v));}
   function receiverAnswer(){buildAnswer($('#recvOffer').value.trim());}
   function enterMirror(){show('mirror');}
-  // Scan button on the mirror screen: make sure this phone's own camera is live
-  // (so the second window has a picture), then scan and lock onto the other phone.
-  async function connectByScan(){
+  /* ---------------- AIM: search, link, and the rising-dot fountain ---------------- */
+  function linkShow(cap,sub){
+    $('#linkCap').textContent=cap||'Establishing private link…';
+    $('#linkSub').textContent=sub||'';
+    $('#linkQR').style.display='none';
+    $('#linking').classList.add('show');
+  }
+  function linkHide(){$('#linking').classList.remove('show');}
+  // AIM button on the mirror screen: make sure this phone's own camera is live
+  // (so the second window has a picture), then scan the other phone's code and
+  // run the pumping-dot animation until the private link locks.
+  async function aimConnect(){
     primeAudio();
     if(!localStream){try{localStream=await gum(camNow());}catch(e){}}
     if(localStream&&!videoB.srcObject){videoB.srcObject=localStream;applyTransform('videoB');}
-    startScan(v=>buildAnswer(v));
+    startScan(raw=>aimLink(raw));
+  }
+  async function aimLink(raw){
+    let off;try{off=await dec(raw);}catch(e){toastMsg("That code isn't valid — aim at the other phone's code");return;}
+    primeAudio();_bellPlayed=false;
+    linkShow('Establishing private link…','Show this reply code to the other phone to finish locking the link.');
+    pc=new RTCPeerConnection(await getIceConfig());
+    pc.ontrack=e=>{bellOnce();linkHide();videoA.srcObject=e.streams[0];phA.style.display='none';applyTransform('videoA');enterMirror();};
+    pc.onconnectionstatechange=()=>{
+      const st=pc.connectionState;
+      if(st==='connected'){bellOnce();linkHide();toastMsg('Linked');enterMirror();}
+      else if(st==='failed'){linkShow('Link failed','Keep both phones on the same Wi‑Fi, then tap AIM to try again.');}
+    };
+    try{
+      await pc.setRemoteDescription({type:'offer',sdp:off.s});
+      const ans=await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      await waitIce(pc);
+      const code=await enc({t:'a',s:pc.localDescription.sdp});
+      renderQR($('#linkQR'),code);
+      $('#linkQR').style.display='';
+    }catch(e){linkShow('Could not build reply',e.message);}
   }
 
   /* ---------------- MIRROR FEATURES ---------------- */
@@ -3018,7 +3070,8 @@ var qrcode = function() {
   $('#scanCancel').addEventListener('click',()=>{if(scanStop)scanStop();});
   $('#scanFlip').addEventListener('click',flipCamera);
   $('#mirrorFlip').addEventListener('click',flipCamera);
-  $('#mirrorScan').addEventListener('click',connectByScan);
+  $('#mirrorAim').addEventListener('click',aimConnect);
+  $('#linkCancel').addEventListener('click',()=>{if(scanStop)scanStop();stopEverything();linkHide();});
 
   $('#menuBtn').addEventListener('click',()=>openMenu(!menu.classList.contains('open')));
   scrim.addEventListener('click',()=>openMenu(false));
