@@ -225,8 +225,9 @@
         <div class="qrbox" id="senderQR"><span class="qr-wait">Preparing…</span></div>
       </div>
       <div class="step">
-        <div class="step-h"><span class="num">2</span>Scan the other phone's reply</div>
-        <div class="row"><button class="btn" id="senderScan">Scan reply</button></div>
+        <div class="step-h"><span class="num">2</span>The other phone links automatically</div>
+        <div class="rc-s" style="color:var(--mute);font-size:12.5px;line-height:1.5">When the other phone scans this code (or aims AIM at it), you link and the bell rings — no reply needed.</div>
+        <div class="row" style="display:none"><button class="btn" id="senderScan">Scan reply</button></div>
       </div>
       <div class="status" id="senderStatus">Waiting to prepare code…</div>
       <div class="row" id="senderRetryRow" style="display:none"><button class="btn" id="senderRetry">Retry camera</button></div>
@@ -254,8 +255,9 @@
         <div class="row"><button class="btn" id="recvScan">Scan code</button></div>
       </div>
       <div class="step">
-        <div class="step-h"><span class="num">2</span>Show this reply to the other phone</div>
-        <div class="qrbox" id="recvQR"><span class="qr-wait">Scan first…</span></div>
+        <div class="step-h"><span class="num">2</span>It links automatically</div>
+        <div class="rc-s" style="color:var(--mute);font-size:12.5px;line-height:1.5">After you scan, the two phones lock in and the bell rings — nothing else to do.</div>
+        <div class="qrbox" id="recvQR" style="display:none"><span class="qr-wait">Scan first…</span></div>
       </div>
       <div class="status" id="recvStatus">Tap Scan and point at the other phone's code.</div>
       <div class="row" id="recvRetryRow" style="display:none"><button class="btn" id="recvRetry">Retry camera</button></div>
@@ -2663,6 +2665,7 @@ var qrcode = function() {
     return qrcode;
 }));
 </script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
 <script>
 (function(){
   "use strict";
@@ -2677,7 +2680,9 @@ var qrcode = function() {
 
   let localStream=null;         // this phone's camera
   let extraStreams=[];          // any other opened streams
-  let pc=null;                  // active RTCPeerConnection
+  let pc=null;                  // active RTCPeerConnection (legacy code-only fallback)
+  let peer=null;                // PeerJS peer (one-tap linking via public broker)
+  let mediaCall=null;           // active PeerJS media call
   let lastFrame=null,pendingFrame=null;
   const mirrored={videoA:false,videoB:true};
   const zoom={videoA:1,videoB:1};
@@ -2798,6 +2803,8 @@ var qrcode = function() {
   function stopEverything(){
     orbit(false);
     _bellPlayed=false;
+    if(mediaCall){try{mediaCall.close();}catch(e){}mediaCall=null;}
+    if(peer){try{peer.destroy();}catch(e){}peer=null;}
     if(pc){try{pc.close();}catch(e){}pc=null;}
     if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
     extraStreams.forEach(s=>s.getTracks().forEach(t=>t.stop()));extraStreams=[];
@@ -2907,41 +2914,53 @@ var qrcode = function() {
     requestAnimationFrame(loop);
   }
 
-  /* ---------------- SENDER (Phone A) ---------------- */
+  /* ---------------- PEERJS ONE-TAP LINK ---------------- */
+  // Create a peer on the free public broker; resolves with {p,id} once it is open.
+  function makePeer(){
+    return new Promise((resolve,reject)=>{
+      if(typeof Peer==='undefined'){reject(new Error('link service not loaded'));return;}
+      let done=false;
+      const p=new Peer();
+      p.on('open',id=>{if(!done){done=true;resolve({p,id});}});
+      p.on('error',e=>{if(!done){done=true;reject(e);}});
+      setTimeout(()=>{if(!done){done=true;reject(new Error('broker timeout'));}},14000);
+    });
+  }
+  // Once a media call is live: remote feed in window A, own camera in window B, ring once.
+  function goTwoWindows(remote){
+    bellOnce();
+    videoA.srcObject=remote;phA.style.display='none';applyTransform('videoA');
+    if(localStream){videoB.srcObject=localStream;applyTransform('videoB');}
+    show('mirror');
+  }
+
+  /* ---------------- SENDER (Phone A: "Show my camera") ---------------- */
   async function startSender(){
     panel('#panelSender');
     primeAudio();_bellPlayed=false;
-    setStatus($('#senderStatus'),'Opening camera and preparing code…','work');
+    setStatus($('#senderStatus'),'Opening camera…','work');
     try{localStream=await gum(camNow());}catch(e){setStatus($('#senderStatus'),'Camera blocked. Open in Chrome over https and allow the camera, then retry.','err');$('#senderRetryRow').style.display='';return;}
     $('#senderRetryRow').style.display='none';
     $('#senderPreview').srcObject=localStream;
-    pc=new RTCPeerConnection(await getIceConfig());
-    localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-    pc.onconnectionstatechange=()=>{
-      const st=pc.connectionState;
-      if(st==='connecting'){orbit(true);}
-      else if(st==='connected'){orbit(false);bellOnce();setStatus($('#senderStatus'),'Connected. Streaming your view.','ok');$('#senderLive').classList.add('show');}
-      else if(st==='failed'){orbit(false);setStatus($('#senderStatus'),'Connection failed. Both phones must share Wi‑Fi; some networks need a relay server.','err');}
-      else if(st==='disconnected'){orbit(false);setStatus($('#senderStatus'),'Disconnected.','err');}
-    };
-    try{
-      const offer=await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await waitIce(pc);
-      const code=await enc({t:'o',s:pc.localDescription.sdp});
-      $('#senderCode').value=code;
-      renderQR($('#senderQR'),code);
-      setStatus($('#senderStatus'),'Show the code to the other phone, then scan its reply.','');
-    }catch(e){setStatus($('#senderStatus'),'Could not prepare code: '+e.message,'err');}
+    setStatus($('#senderStatus'),'Getting a link code…','work');
+    let pr;
+    try{pr=await makePeer();}catch(e){setStatus($('#senderStatus'),'Could not reach the link service. Check your internet and tap Retry.','err');$('#senderRetryRow').style.display='';return;}
+    peer=pr.p;
+    const code=await enc({t:'p',id:pr.id});
+    $('#senderCode').value=code;
+    renderQR($('#senderQR'),code);
+    setStatus($('#senderStatus'),'Show this code to the other phone. It links automatically — no reply needed.','');
+    peer.on('error',e=>{setStatus($('#senderStatus'),'Link service error — tap Retry.','err');$('#senderRetryRow').style.display='';});
+    peer.on('call',call=>{
+      orbit(false);
+      mediaCall=call;
+      call.answer(localStream);                 // send our camera and receive theirs
+      call.on('stream',remote=>{goTwoWindows(remote);$('#senderLive').classList.add('show');setStatus($('#senderStatus'),'Linked.','ok');});
+      call.on('close',()=>{});
+    });
   }
-  async function acceptReply(raw){
-    if(!raw){setStatus($('#senderStatus'),'No reply captured.','err');return;}
-    let ans;try{ans=await dec(raw);}catch(e){setStatus($('#senderStatus'),"That reply code isn't valid.",'err');return;}
-    try{await pc.setRemoteDescription({type:'answer',sdp:ans.s});setStatus($('#senderStatus'),'Reply accepted — connecting…','work');}
-    catch(e){setStatus($('#senderStatus'),'Could not use that reply: '+e.message,'err');}
-  }
-  function senderScan(){startScan(v=>acceptReply(v));}
-  function senderConnect(){acceptReply($('#senderReply').value.trim());}
+  function senderScan(){startSender();}          // legacy buttons now just (re)prepare the code
+  function senderConnect(){startSender();}
 
   /* ---------------- RECEIVER (Phone B) ---------------- */
   async function startReceiver(){
@@ -2976,8 +2995,8 @@ var qrcode = function() {
       setStatus($('#recvStatus'),'Show this reply to the other phone.','');
     }catch(e){setStatus($('#recvStatus'),'Could not build reply: '+e.message,'err');}
   }
-  function recvScan(){startScan(v=>buildAnswer(v));}
-  function receiverAnswer(){buildAnswer($('#recvOffer').value.trim());}
+  function recvScan(){startScan(v=>aimLink(v));}
+  function receiverAnswer(){aimLink($('#recvOffer').value.trim());}
   function enterMirror(){show('mirror');}
   /* ---------------- AIM: search, link, and the rising-dot fountain ---------------- */
   function linkShow(cap,sub){
@@ -2996,26 +3015,27 @@ var qrcode = function() {
     if(localStream&&!videoB.srcObject){videoB.srcObject=localStream;applyTransform('videoB');}
     startScan(raw=>aimLink(raw));
   }
+  // One-tap link: read the other phone's code once, then call it through the
+  // public broker. Fountain pumps until the stream arrives, then bell + two windows.
   async function aimLink(raw){
     let off;try{off=await dec(raw);}catch(e){toastMsg("That code isn't valid — aim at the other phone's code");return;}
+    if(!off||off.t!=='p'||!off.id){toastMsg("That code is from an older version — update the other phone, then try again.");return;}
     primeAudio();_bellPlayed=false;
-    linkShow('Establishing private link…','Show this reply code to the other phone to finish locking the link.');
-    pc=new RTCPeerConnection(await getIceConfig());
-    pc.ontrack=e=>{bellOnce();linkHide();videoA.srcObject=e.streams[0];phA.style.display='none';applyTransform('videoA');enterMirror();};
-    pc.onconnectionstatechange=()=>{
-      const st=pc.connectionState;
-      if(st==='connected'){bellOnce();linkHide();toastMsg('Linked');enterMirror();}
-      else if(st==='failed'){linkShow('Link failed','Keep both phones on the same Wi‑Fi, then tap AIM to try again.');}
-    };
-    try{
-      await pc.setRemoteDescription({type:'offer',sdp:off.s});
-      const ans=await pc.createAnswer();
-      await pc.setLocalDescription(ans);
-      await waitIce(pc);
-      const code=await enc({t:'a',s:pc.localDescription.sdp});
-      renderQR($('#linkQR'),code);
-      $('#linkQR').style.display='';
-    }catch(e){linkShow('Could not build reply',e.message);}
+    if(!localStream){try{localStream=await gum(camNow());}catch(e){toastMsg('Camera needed');return;}}
+    videoB.srcObject=localStream;applyTransform('videoB');
+    linkShow('Establishing private link…','Searching for the other phone and locking into your private network…');
+    let pr;
+    try{pr=await makePeer();}catch(e){linkShow('Could not reach link service','Check your internet, then tap AIM to try again.');return;}
+    peer=pr.p;
+    let got=false;
+    peer.on('error',()=>{if(!got)linkShow('Link failed','Make sure the other phone is showing its code, then tap AIM to retry.');});
+    const call=peer.call(off.id,localStream);
+    if(!call){linkShow('Link failed','Tap AIM to try again.');return;}
+    mediaCall=call;
+    call.on('stream',remote=>{if(got)return;got=true;linkHide();goTwoWindows(remote);});
+    call.on('error',()=>{if(!got)linkShow('Link failed','Tap AIM to try again.');});
+    call.on('close',()=>{});
+    setTimeout(()=>{if(!got)linkShow('Still searching…','Check that the other phone shows its code and that you aimed at it. Tap Cancel to stop.');},16000);
   }
 
   /* ---------------- MIRROR FEATURES ---------------- */
